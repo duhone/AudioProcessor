@@ -62,6 +62,16 @@ struct WavFile {
 	vector<int16_t> Data;
 };
 
+#pragma pack(1)
+struct CRAUDHeader {
+	uint32_t FourCC{'CRAU'};
+	uint16_t Version{1};
+	uint16_t EncoderDelaySamples{0};
+	uint32_t NSamples{0};
+	uint8_t NChannels{0};
+};
+#pragma pack()
+
 WavFile ReadWaveFile(const fs::path& a_inputPath) {
 	WavFile result;
 
@@ -183,6 +193,8 @@ int main(int argc, char** argv) {
 		app.exit(error);
 	}
 
+	uint32_t nSamples = (uint32_t)pcmData.Data.size() / pcmData.NChannels;
+
 	opus_encoder_ctl(encoder, OPUS_SET_BITRATE(128000 * pcmData.NChannels));
 	opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(9));
 	int32_t encoderDelay = 0;
@@ -197,10 +209,21 @@ int main(int argc, char** argv) {
 	paddingBytes          = paddingBytes == 0 ? 0 : totalFrameSize - paddingBytes;
 	pcmData.Data.resize(pcmData.Data.size() + encoderDelay + paddingBytes);
 
+	FileHandle outFile(outputPath);
+	{
+		CRAUDHeader header;
+		header.EncoderDelaySamples = (uint16_t)encoderDelay;
+		header.NSamples            = nSamples;
+		header.NChannels           = (uint8_t)pcmData.NChannels;
+
+		Write(outFile, header);
+	}
+
 	uint32_t nframes = ((uint32_t)pcmData.Data.size() / totalFrameSize);
 	for(uint32_t frame = 0; frame < nframes; ++frame) {
-		opus_encode(encoder, pcmData.Data.data() + frame * totalFrameSize, c_OpusFrameSize, (uint8_t*)outBuffer.data(),
-		            (int32_t)outBuffer.size());
+		int32_t bytesWritten = opus_encode(encoder, pcmData.Data.data() + frame * totalFrameSize, c_OpusFrameSize,
+		                                   (uint8_t*)outBuffer.data(), (int32_t)outBuffer.size());
+		fwrite(outBuffer.data(), sizeof(std::byte), bytesWritten, outFile);
 	}
 
 	opus_encoder_destroy(encoder);
