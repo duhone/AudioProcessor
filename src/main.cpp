@@ -7,6 +7,7 @@
 #include "core/Log.h"
 
 #include <3rdParty/fmt.h>
+#include <3rdParty/opus.h>
 
 #define DOCTEST_CONFIG_IMPLEMENT
 #include <3rdParty/doctest.h>
@@ -19,6 +20,16 @@ using namespace std::chrono_literals;
 namespace fs = std::filesystem;
 using namespace CR;
 using namespace CR::Core;
+
+static const uint32_t c_SampleRate     = 48000;
+static const uint32_t c_OpusBitRate    = 128000;
+static const uint32_t c_OpusFrameSize  = 480;
+static const uint32_t c_bytesPerSample = 2;
+// for one channel
+static const uint32_t c_OpusOutSamplesPerSec =
+    (uint32_t)((((int64_t)c_OpusBitRate / 8) * c_OpusFrameSize) / c_SampleRate);
+// extra 2x, allow opus to encode a single frame up to 2x the ideal size
+static const uint32_t c_OpusOutFrameSizePerChannel = c_OpusOutSamplesPerSec * c_bytesPerSample * 2;
 
 struct ChunkHeader {
 	uint32_t ChunkID;
@@ -163,6 +174,36 @@ int main(int argc, char** argv) {
 		                 CLI::ExitCodes::FileError};
 		app.exit(error);
 	}
+
+	int opusError        = 0;
+	OpusEncoder* encoder = opus_encoder_create(48000, pcmData.NChannels, OPUS_APPLICATION_AUDIO, &opusError);
+
+	if(encoder == nullptr || opusError != 0) {
+		CLI::Error error{"input file", "Failed to create opus encoder", CLI::ExitCodes::HorribleError};
+		app.exit(error);
+	}
+
+	opus_encoder_ctl(encoder, OPUS_SET_BITRATE(128000 * pcmData.NChannels));
+	opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(9));
+	int32_t encoderDelay = 0;
+	opus_encoder_ctl(encoder, OPUS_GET_LOOKAHEAD(&encoderDelay));
+
+	std::vector<std::byte> outBuffer;
+	outBuffer.resize(c_OpusOutFrameSizePerChannel * pcmData.NChannels);
+
+	uint32_t totalFrameSize = c_OpusFrameSize * pcmData.NChannels;
+
+	uint32_t paddingBytes = (pcmData.Data.size() + encoderDelay) % totalFrameSize;
+	paddingBytes          = paddingBytes == 0 ? 0 : totalFrameSize - paddingBytes;
+	pcmData.Data.resize(pcmData.Data.size() + encoderDelay + paddingBytes);
+
+	uint32_t nframes = ((uint32_t)pcmData.Data.size() / totalFrameSize);
+	for(uint32_t frame = 0; frame < nframes; ++frame) {
+		opus_encode(encoder, pcmData.Data.data() + frame * totalFrameSize, c_OpusFrameSize, (uint8_t*)outBuffer.data(),
+		            (int32_t)outBuffer.size());
+	}
+
+	opus_encoder_destroy(encoder);
 
 	return 0;
 }
